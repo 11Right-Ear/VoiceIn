@@ -181,7 +181,8 @@ class AudioCapture:
                 pass
 
         if self._consumer_thread is not None:
-            self._consumer_thread.join(timeout=3.0)
+            if self._consumer_thread is not threading.current_thread():
+                self._consumer_thread.join(timeout=3.0)
             self._consumer_thread = None
 
         self._queue = None
