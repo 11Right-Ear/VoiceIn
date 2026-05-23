@@ -7,44 +7,43 @@
 #include <functiondiscoverykeys_devpkey.h>
 
 #include <cstdio>
+#include <cstring>
 
 #pragma comment(lib, "ole32.lib")
 
 // ---------------------------------------------------------------------------
-// Ring buffer: 4 seconds at 16000 Hz mono = 64000 samples, next power of 2
+// Constants
 // ---------------------------------------------------------------------------
-static constexpr size_t kRingCapacity = 65536; // 2^16, ~256 KB
-static constexpr int    kPollIntervalMs = 10;  // WASAPI poll granularity
+static constexpr size_t kRingCapacity   = 65536; // 2^16, ~256 KB
+static constexpr int    kPollIntervalMs = 10;
+static constexpr int    kMaxBlockFrames = 16384; // 1s at 16kHz stereo
 
 // ---------------------------------------------------------------------------
-// Per-session global state
+// Per-session state
 // ---------------------------------------------------------------------------
 struct CaptureSession {
-    // User parameters
     int      device_id   = -1;
     int      sample_rate = 16000;
     int      channels    = 1;
     int      block_ms    = 100;
 
-    // WASAPI COM objects
     IMMDeviceEnumerator  *enumerator     = nullptr;
     IMMDevice            *device         = nullptr;
     IAudioClient         *audio_client   = nullptr;
     IAudioCaptureClient  *capture_client = nullptr;
 
-    // Requested format that WASAPI accepted
     WAVEFORMATEX          actual_format  = {};
+    WAVEFORMATEXTENSIBLE  actual_fmt_ext = {}; // full format, may be >44 bytes
+    int                   target_sample_rate = 0;
+    int                   target_channels    = 0;
+    bool                  need_conversion    = false;
 
-    // Ring buffer + capture thread
     RingBuffer<float, kRingCapacity> *ring = nullptr;
     HANDLE                 thread       = nullptr;
     volatile LONG          running      = 0;
     audio_callback_t       callback     = nullptr;
-
-    // Samples per block (for flushing to callback)
     int                    block_samples = 0;
 
-    // Last error (thread safe via critical section)
     CRITICAL_SECTION       error_lock;
     wchar_t                last_error[512] = {};
 
@@ -64,7 +63,7 @@ struct CaptureSession {
 static CaptureSession g;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Error helpers
 // ---------------------------------------------------------------------------
 static void set_error(const wchar_t *fmt, ...) {
     va_list args;
@@ -76,7 +75,7 @@ static void set_error(const wchar_t *fmt, ...) {
 }
 
 // ---------------------------------------------------------------------------
-// audio_list_devices
+// Device enumeration
 // ---------------------------------------------------------------------------
 int audio_list_devices(audio_device_info_t **devices_out) {
     if (!devices_out) { set_error(L"devices_out is NULL"); return -1; }
@@ -110,10 +109,9 @@ int audio_list_devices(audio_device_info_t **devices_out) {
     UINT count = 0;
     collection->GetCount(&count);
 
-    auto *devices = new audio_device_info_t[count + 1]; // +1 for default
+    auto *devices = new audio_device_info_t[count + 1];
     int out_idx = 0;
 
-    // Default device as id=-1
     {
         auto &d = devices[out_idx];
         wcscpy_s(d.name, L"Default Device");
@@ -161,10 +159,65 @@ void audio_free_device_list(audio_device_info_t *devices) {
 }
 
 // ---------------------------------------------------------------------------
+// Format conversion helpers
+// ---------------------------------------------------------------------------
+static void convert_audio_raw(
+    const BYTE *src, UINT32 src_frames,
+    const WAVEFORMATEX *src_fmt,
+    float *dst, size_t &dst_out)
+{
+    int src_ch   = src_fmt->nChannels;
+    int src_sr   = src_fmt->nSamplesPerSec;
+    int src_bps  = src_fmt->wBitsPerSample;
+    bool is_float = (src_fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+                 || (src_fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE);
+
+    int dst_ch = g.target_channels;
+    int dst_sr = g.target_sample_rate;
+    double ratio = (double)dst_sr / (double)src_sr;
+
+    size_t out = 0;
+
+    for (UINT32 i = 0; i < src_frames; ++i) {
+        float sample = 0.0f;
+        int ch_to_mix = (src_ch > 2) ? 1 : src_ch;
+        for (int ch = 0; ch < ch_to_mix; ++ch) {
+            if (is_float) {
+                sample += reinterpret_cast<const float *>(src)[i * src_ch + ch];
+            } else if (src_bps == 16) {
+                sample += reinterpret_cast<const short *>(src)[i * src_ch + ch] / 32768.0f;
+            } else if (src_bps == 8) {
+                sample += reinterpret_cast<const BYTE *>(src)[i * src_ch + ch] / 128.0f - 1.0f;
+            }
+        }
+        if (ch_to_mix > 0) sample /= (float)ch_to_mix;
+
+        double dst_pos = (double)i * ratio;
+        size_t idx = (size_t)dst_pos;
+        dst[idx] = sample;
+        if (idx + 1 > out) out = idx + 1;
+        if (out >= kMaxBlockFrames) break;
+    }
+
+    dst_out = out;
+}
+
+static void push_audio(const BYTE *data, UINT32 frames) {
+    if (g.need_conversion) {
+        float converted[kMaxBlockFrames];
+        size_t dst_samples = 0;
+        convert_audio_raw(data, frames, &g.actual_format, converted, dst_samples);
+        g.ring->write(converted, dst_samples);
+    } else {
+        size_t n = static_cast<size_t>(frames) * g.channels;
+        g.ring->write(reinterpret_cast<const float *>(data), n);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // audio_init
 // ---------------------------------------------------------------------------
 int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
-    // Basic validation
     if (sample_rate != 16000 && sample_rate != 48000) {
         set_error(L"sample_rate must be 16000 or 48000, got %d", sample_rate);
         return -1;
@@ -178,9 +231,7 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
         return -1;
     }
 
-    // Validate the device exists by attempting to get it
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    bool com_inited = SUCCEEDED(hr);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         set_error(L"CoInitializeEx failed: 0x%08X", hr);
         return -2;
@@ -191,7 +242,6 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
                           __uuidof(IMMDeviceEnumerator), (void **)&enumerator);
     if (FAILED(hr)) {
         set_error(L"CoCreateInstance(MMDeviceEnumerator) failed: 0x%08X", hr);
-        // COM stays initialized for capture thread use
         return -3;
     }
 
@@ -210,11 +260,9 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
     if (FAILED(hr) || !device) {
         set_error(L"Device not found (id=%d, hr=0x%08X)", device_id, hr);
         enumerator->Release();
-        // COM stays initialized for capture thread use
         return -4;
     }
 
-    // Create audio client
     IAudioClient *audio_client = nullptr;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                           (void **)&audio_client);
@@ -222,11 +270,10 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
         set_error(L"Activate(IAudioClient) failed: 0x%08X", hr);
         device->Release();
         enumerator->Release();
-        // COM stays initialized for capture thread use
         return -5;
     }
 
-    // Setup WAVEFORMATEXTENSIBLE for float32
+    // --- Build requested format ---
     WAVEFORMATEXTENSIBLE wfx = {};
     wfx.Format.cbSize               = 22;
     wfx.Format.wFormatTag           = WAVE_FORMAT_EXTENSIBLE;
@@ -240,45 +287,56 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
                                                       : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
     wfx.SubFormat                   = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 
-    // Try to initialize with our format
-    // hnsBufferDuration = 0 lets the engine pick; use block_ms * 2 for safety
-    REFERENCE_TIME hns_buf = static_cast<REFERENCE_TIME>(block_ms) * 20000; // ms → hns, x2 margin
+    REFERENCE_TIME hns_buf = static_cast<REFERENCE_TIME>(block_ms) * 20000;
 
+    // Try requested format first
     hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, hns_buf, 0,
                                   (WAVEFORMATEX *)&wfx, nullptr);
 
-    if (FAILED(hr)) {
-        // Fallback: try with plain WAVEFORMATEX (no extensible)
-        WAVEFORMATEX wfx2 = {};
-        wfx2.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
-        wfx2.nChannels       = static_cast<WORD>(channels);
-        wfx2.nSamplesPerSec  = static_cast<DWORD>(sample_rate);
-        wfx2.wBitsPerSample  = 32;
-        wfx2.nBlockAlign     = static_cast<WORD>(channels * 4);
-        wfx2.nAvgBytesPerSec = static_cast<DWORD>(sample_rate) * channels * 4;
-        wfx2.cbSize          = 0;
+    if (SUCCEEDED(hr)) {
+        g.actual_format = wfx.Format;
+    } else {
+        // Fallback: get native mix format and convert
+        WAVEFORMATEX *pwfx = nullptr;
+        hr = audio_client->GetMixFormat(&pwfx);
+        if (FAILED(hr) || !pwfx) {
+            set_error(L"GetMixFormat failed: 0x%08X", hr);
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+            return -6;
+        }
+
+        // Copy full format (may be WAVEFORMATEXTENSIBLE)
+        size_t sz = sizeof(WAVEFORMATEX) + pwfx->cbSize;
+        if (sz > sizeof(g.actual_fmt_ext)) sz = sizeof(g.actual_fmt_ext);
+        memcpy(&g.actual_fmt_ext, pwfx, sz);
+        g.actual_format = g.actual_fmt_ext.Format;
+        CoTaskMemFree(pwfx);
 
         hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, hns_buf, 0,
-                                      &wfx2, nullptr);
-        if (SUCCEEDED(hr)) {
-            g.actual_format = wfx2;
+                                      (WAVEFORMATEX *)&g.actual_fmt_ext, nullptr);
+        if (FAILED(hr)) {
+            hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 0, 0,
+                                          (WAVEFORMATEX *)&g.actual_fmt_ext, nullptr);
         }
-    } else {
-        g.actual_format = wfx.Format;
+
+        if (FAILED(hr)) {
+            set_error(L"Initialize(mix %dHz/%dch/%dbit fmt=0x%04X cb=%d) failed: 0x%08X",
+                      (int)g.actual_format.nSamplesPerSec, (int)g.actual_format.nChannels,
+                      (int)g.actual_format.wBitsPerSample, (int)g.actual_format.wFormatTag,
+                      (int)g.actual_format.cbSize, hr);
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+            return -7;
+        }
+
+        g.need_conversion = true;
+        g.target_sample_rate = sample_rate;
+        g.target_channels    = channels;
     }
 
-    if (FAILED(hr)) {
-        set_error(L"IAudioClient::Initialize failed: 0x%08X. "
-                  L"Device may not support %d Hz float32",
-                  hr, sample_rate);
-        audio_client->Release();
-        device->Release();
-        enumerator->Release();
-        // COM stays initialized for capture thread use
-        return -6;
-    }
-
-    // Get capture client
     IAudioCaptureClient *capture_client = nullptr;
     hr = audio_client->GetService(__uuidof(IAudioCaptureClient),
                                   (void **)&capture_client);
@@ -287,33 +345,27 @@ int audio_init(int device_id, int sample_rate, int channels, int block_ms) {
         audio_client->Release();
         device->Release();
         enumerator->Release();
-        // COM stays initialized for capture thread use
-        return -7;
+        return -8;
     }
 
-    // Compute block size
-    int block_samples = sample_rate * channels * block_ms / 1000;
-
-    // Store session state
     g.device_id       = device_id;
     g.sample_rate     = sample_rate;
     g.channels        = channels;
     g.block_ms        = block_ms;
-    g.block_samples   = block_samples;
+    g.block_samples   = sample_rate * channels * block_ms / 1000;
     g.enumerator      = enumerator;
     g.device          = device;
     g.audio_client    = audio_client;
     g.capture_client  = capture_client;
     g.ring            = new RingBuffer<float, kRingCapacity>();
 
-    // COM stays alive for capture thread; released in audio_close
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Capture thread procedure
+// Capture thread
 // ---------------------------------------------------------------------------
-static DWORD WINAPI capture_thread_proc(LPVOID /*param*/) {
+static DWORD WINAPI capture_thread_proc(LPVOID) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         g.set_error(L"CoInitializeEx on capture thread failed: 0x%08X", hr);
@@ -334,38 +386,33 @@ static DWORD WINAPI capture_thread_proc(LPVOID /*param*/) {
     next_cb.QuadPart += cb_ticks;
 
     while (g.running) {
-        // Read all available WASAPI packets
         UINT32 packet_size = 0;
         hr = g.capture_client->GetNextPacketSize(&packet_size);
 
         while (SUCCEEDED(hr) && packet_size > 0) {
-            BYTE   *data   = nullptr;
+            BYTE   *data = nullptr;
             UINT32  frames = 0;
-            DWORD   flags  = 0;
+            DWORD   flags = 0;
             hr = g.capture_client->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
 
             if (SUCCEEDED(hr)) {
                 if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
-                    // data is float32 interleaved PCM
-                    size_t sample_count = static_cast<size_t>(frames) * g.channels;
-                    g.ring->write(reinterpret_cast<const float *>(data), sample_count);
+                    push_audio(data, frames);
                 }
                 g.capture_client->ReleaseBuffer(frames);
             }
             g.capture_client->GetNextPacketSize(&packet_size);
         }
 
-        // Flush accumulated ring-buffer data to callback every block_ms
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         if (now.QuadPart >= next_cb.QuadPart) {
-            float block[16384];
-            size_t read = g.ring->read(block, _countof(block));
+            float block[kMaxBlockFrames];
+            size_t read = g.ring->read(block, kMaxBlockFrames);
             if (read > 0 && g.callback) {
                 g.callback(block, static_cast<int>(read), g.sample_rate);
             }
 
-            // Skip missed blocks
             next_cb.QuadPart += cb_ticks;
             if (next_cb.QuadPart <= now.QuadPart) {
                 next_cb.QuadPart = now.QuadPart + cb_ticks;
@@ -375,10 +422,10 @@ static DWORD WINAPI capture_thread_proc(LPVOID /*param*/) {
         Sleep(kPollIntervalMs);
     }
 
-    // Final flush of remaining buffered data
+    // Final flush
     {
-        float remaining[16384];
-        size_t read = g.ring->read(remaining, _countof(remaining));
+        float remaining[kMaxBlockFrames];
+        size_t read = g.ring->read(remaining, kMaxBlockFrames);
         if (read > 0 && g.callback) {
             g.callback(remaining, static_cast<int>(read), g.sample_rate);
         }
@@ -390,21 +437,12 @@ static DWORD WINAPI capture_thread_proc(LPVOID /*param*/) {
 }
 
 // ---------------------------------------------------------------------------
-// audio_start / audio_stop / audio_close
+// Public API
 // ---------------------------------------------------------------------------
 int audio_start(audio_callback_t callback) {
-    if (g.running) {
-        set_error(L"Already capturing");
-        return -1;
-    }
-    if (!g.audio_client) {
-        set_error(L"Not initialized — call audio_init first");
-        return -2;
-    }
-    if (!callback) {
-        set_error(L"callback is NULL");
-        return -3;
-    }
+    if (g.running) { set_error(L"Already capturing"); return -1; }
+    if (!g.audio_client) { set_error(L"Not initialized — call audio_init first"); return -2; }
+    if (!callback) { set_error(L"callback is NULL"); return -3; }
 
     g.callback = callback;
     g.running  = 1;
@@ -416,19 +454,15 @@ int audio_start(audio_callback_t callback) {
         set_error(L"CreateThread failed: error %lu", GetLastError());
         return -4;
     }
-
-    // Bump thread priority for low-latency audio
     SetThreadPriority(g.thread, THREAD_PRIORITY_HIGHEST);
-
     return 0;
 }
 
 int audio_stop(void) {
     if (!g.running) return 0;
-
     g.running = 0;
     if (g.thread) {
-        WaitForSingleObject(g.thread, 5000); // 5s timeout
+        WaitForSingleObject(g.thread, 5000);
         CloseHandle(g.thread);
         g.thread = nullptr;
     }
@@ -437,17 +471,12 @@ int audio_stop(void) {
 }
 
 void audio_close(void) {
-    if (g.running) {
-        audio_stop();
-    }
-
-    delete g.ring;
-    g.ring = nullptr;
-
-    if (g.capture_client)  { g.capture_client->Release(); g.capture_client = nullptr; }
-    if (g.audio_client)    { g.audio_client->Release();   g.audio_client   = nullptr; }
-    if (g.device)          { g.device->Release();         g.device         = nullptr; }
-    if (g.enumerator)      { g.enumerator->Release();     g.enumerator     = nullptr; }
+    if (g.running) audio_stop();
+    delete g.ring;  g.ring = nullptr;
+    if (g.capture_client) { g.capture_client->Release(); g.capture_client = nullptr; }
+    if (g.audio_client)   { g.audio_client->Release();   g.audio_client   = nullptr; }
+    if (g.device)         { g.device->Release();         g.device         = nullptr; }
+    if (g.enumerator)     { g.enumerator->Release();     g.enumerator     = nullptr; }
 }
 
 const wchar_t *audio_last_error(void) {
