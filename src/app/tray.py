@@ -55,7 +55,7 @@ class TrayIcon:
         self._tray = pystray.Icon(
             "VoiceIn",
             self._icon_idle,
-            "VoiceIn — Ctrl+Shift+V 开始语音输入",
+            "VoiceIn — Ctrl+Alt+S 开始语音输入",
             menu,
         )
 
@@ -76,7 +76,7 @@ class TrayIcon:
         if recording:
             self._tray.title = "VoiceIn — 正在录音... 再次按热键停止"
         else:
-            self._tray.title = "VoiceIn — Ctrl+Shift+V 开始语音输入"
+            self._tray.title = "VoiceIn — Ctrl+Alt+S 开始语音输入"
 
     def notify(self, title: str, msg: str) -> None:
         self._tray.notify(title, msg)

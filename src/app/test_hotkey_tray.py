@@ -18,14 +18,14 @@ def on_quit():
 print("=" * 50)
 print("  VoiceIn 测试模式")
 print("  托盘图标已出现 — 查看任务栏右下角")
-print("  按 Ctrl+Shift+V 测试热键")
+print("  按 Ctrl+Alt+S 测试热键")
 print("  右键托盘图标 → 退出")
 print("=" * 50)
 
 # Start hotkey
 hotkey = GlobalHotkey(callback=on_hotkey)
 hotkey.start()
-print("热键已注册: Ctrl+Shift+V")
+print("热键已注册: Ctrl+Alt+S")
 
 # Start tray (blocks until quit)
 tray = TrayIcon(on_quit=on_quit)

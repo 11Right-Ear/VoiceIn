@@ -11,7 +11,7 @@ MOD_SHIFT    = 0x0004
 MOD_WIN      = 0x0008
 WM_HOTKEY    = 0x0312
 
-VK_V         = 0x56
+VK_S         = 0x53
 HOTKEY_ID    = 1
 
 # --- Win32 types & functions ---
@@ -36,8 +36,8 @@ class GlobalHotkey:
 
     def __init__(
         self,
-        modifiers: int = MOD_CONTROL | MOD_SHIFT,
-        vk: int = VK_V,
+        modifiers: int = MOD_ALT | MOD_CONTROL,
+        vk: int = VK_S,
         callback: Callable[[], None] | None = None,
     ) -> None:
         self._modifiers = modifiers
