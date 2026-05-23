@@ -15,7 +15,7 @@ class Config:
     sample_rate: int = 16000
     block_ms: int = 100
     vad_timeout_ms: int = 1500
-    device_id: int = -1
+    device_id: int = 1    # Intel mic array (not ToDesk virtual)
     model_dir: str = ""
 
 

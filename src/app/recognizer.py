@@ -172,13 +172,14 @@ class Recognizer:
         if sid not in self._has_decoded:
             total = self._acc_total.get(sid, 0)
             if total < self._MIN_FIRST_DECODE:
-                return  # not enough yet
-            # Flush accumulated audio
+                return
             acc = self._acc.pop(sid, [])
             self._acc_total.pop(sid, None)
             merged = np.concatenate(acc) if acc else np.zeros(0, dtype=np.float32)
+            print(f"[RECOG] first decode: feeding {len(merged)} samples ({len(merged)/self._sample_rate:.1f}s)")
             stream.accept_waveform(self._sample_rate, merged)
             self._has_decoded.add(sid)
+            print("[RECOG] first decode done")
         self._rec.decode_stream(stream)
 
     def get_text(self, stream: OnlineStream) -> str:
