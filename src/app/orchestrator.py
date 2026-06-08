@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from enum import Enum, auto
 from pathlib import Path
 
@@ -31,16 +30,12 @@ class Orchestrator:
         self._audio: AudioCapture | None = None
         self._rec: Recognizer | None = None
 
-    # ----- public API (called from hotkey thread) -----
-
     def on_hotkey(self) -> None:
         with self._lock:
             if self._state == State.IDLE:
                 self._start()
             elif self._state == State.RECORDING:
                 self._stop()
-
-    # ----- internal -----
 
     def _start(self) -> None:
         model_dir = self._cfg.model_dir or str(
@@ -58,47 +53,36 @@ class Orchestrator:
             )
         except Exception as e:
             self._tray.notify("VoiceIn 错误", f"初始化失败: {e}")
-            print(f"[DEBUG] init error: {e}")
             return
 
         self._state = State.RECORDING
         self._tray.set_recording(True)
 
         self._stream = self._rec.create_stream()
-        self._final_text = ""
         self._text = ""
+        self._acc_samples = 0
 
         try:
             self._audio.start(self._on_audio)
-            print("[DEBUG] recording started")
         except Exception as e:
             self._state = State.IDLE
             self._tray.set_recording(False)
             self._tray.notify("VoiceIn 错误", f"启动录音失败: {e}")
-            print(f"[DEBUG] start error: {e}")
 
     def _stop(self) -> None:
-        print(f"[DEBUG] _stop called, state={self._state}")
         self._state = State.FINALIZING
         if self._audio:
-            print("[DEBUG] stopping audio...")
             self._audio.stop()
-            print("[DEBUG] audio stopped")
 
-        if self._rec:
-            self._final_text = self._rec.get_text(self._stream).strip()
-            print(f"[DEBUG] final_text='{self._final_text}'")
+        if self._rec and self._stream:
+            self._rec.decode(self._stream)
+            final_text = self._rec.get_text(self._stream).strip()
 
-        if self._final_text:
-            self._state = State.PASTING
-            print(f"[DEBUG] pasting: '{self._final_text}'")
-            paste(self._final_text)
-            print("[DEBUG] paste done")
-        else:
-            print("[DEBUG] no text to paste")
+            if final_text:
+                self._state = State.PASTING
+                paste(final_text)
 
         self._cleanup()
-        print("[DEBUG] cleanup done")
 
     def _cleanup(self) -> None:
         if self._audio:
@@ -109,20 +93,22 @@ class Orchestrator:
         self._tray.set_recording(False)
         self._state = State.IDLE
 
-    _audio_call_count = 0
-
     def _on_audio(self, samples: np.ndarray, sample_rate: int) -> None:
-        self._audio_call_count += 1
         with self._lock:
             if self._state != State.RECORDING:
                 return
             self._rec.accept_waveform(self._stream, samples)
+            self._acc_samples += len(samples)
+
+            # Skip decode until enough audio for the encoder chunk
+            # Model needs: left_context(64) + chunk(32) = 96 feature frames ≈ 15360 samples
+            if self._acc_samples < 16000:
+                return
+
             self._rec.decode(self._stream)
             new_text = self._rec.get_text(self._stream)
             if new_text != self._text:
                 self._text = new_text
-                print(f"[DEBUG] text so far: '{new_text}'")
 
             if self._rec.is_endpoint(self._stream):
-                print(f"[DEBUG] VAD endpoint at call #{self._audio_call_count}")
                 self._stop()

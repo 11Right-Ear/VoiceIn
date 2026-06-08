@@ -71,9 +71,23 @@ class GlobalHotkey:
     def _run(self) -> None:
         self._thread_id = _kernel32.GetCurrentThreadId()
 
+        # Clear stale registration from a previous run
+        _user32.UnregisterHotKey(None, HOTKEY_ID)
+
         if not _user32.RegisterHotKey(None, HOTKEY_ID, self._modifiers, self._vk):
-            print(f"[hotkey] RegisterHotKey failed: {_kernel32.GetLastError()}")
-            return
+            err = _kernel32.GetLastError()
+            if err == 1409:  # ERROR_HOTKEY_ALREADY_REGISTERED
+                print(f"[hotkey] Ctrl+Alt+S 已被占用，尝试重试...")
+                import time
+                time.sleep(1)
+                _user32.UnregisterHotKey(None, HOTKEY_ID)
+                if not _user32.RegisterHotKey(None, HOTKEY_ID, self._modifiers, self._vk):
+                    err = _kernel32.GetLastError()
+                    print(f"[hotkey] 注册失败: {err} (请检查其他软件是否占用 Ctrl+Alt+S)")
+                    return
+            else:
+                print(f"[hotkey] RegisterHotKey failed: {err}")
+                return
 
         try:
             msg = _MSG()
