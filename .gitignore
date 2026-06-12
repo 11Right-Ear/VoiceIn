@@ -37,3 +37,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Large binary files
+*.tar.bz2

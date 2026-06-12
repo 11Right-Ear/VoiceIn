@@ -25,12 +25,30 @@ def main() -> None:
         hotkey.stop()
 
     tray = TrayIcon(on_quit=_on_quit)
+
+    # Show tray first, then load model (takes a few seconds)
+    import threading
+
+    def _load_and_ready() -> None:
+        nonlocal orch
+        try:
+            orch_local = Orchestrator(cfg, tray)
+            orch = orch_local
+            tray.notify("VoiceIn 已就绪", "按 Ctrl+Alt+S 开始语音输入")
+        except Exception as e:
+            tray.notify("VoiceIn 错误", f"模型加载失败: {e}")
+
     hotkey = GlobalHotkey(
         modifiers=cfg.hotkey_modifiers,
         vk=cfg.hotkey_vk,
         callback=lambda: orch and orch.on_hotkey(),
     )
-    orch = Orchestrator(cfg, tray)
+
+    tray.notify("VoiceIn", "正在加载语音模型...")
+
+    # Load model in background so the tray shows immediately
+    t = threading.Thread(target=_load_and_ready, daemon=True)
+    t.start()
 
     hotkey.start()
     tray.run()

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import shutil
 import sys
 import tarfile
@@ -8,6 +11,16 @@ from pathlib import Path
 
 import numpy as np
 from sherpa_onnx import OnlineRecognizer as _SherpaOnline, OnlineStream
+
+
+def _clear_proxy_env() -> None:
+    """Clear proxy env vars so funasr/modelscope use the local model cache
+    instead of trying to reach modelscope.cn through a dead proxy."""
+    for k in (
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "ALL_PROXY", "all_proxy",
+    ):
+        os.environ.pop(k, None)
 
 
 DEFAULT_MODEL_NAME = "zh-small-zipformer"
@@ -145,3 +158,121 @@ class Recognizer:
 
     def reset(self, stream: OnlineStream) -> None:
         self._rec.reset(stream)
+
+
+class SenseVoiceRecognizer:
+    """Offline Chinese ASR via Sherpa-ONNX SenseVoice (整段识别，非流式).
+
+    Designed to be fed complete speech segments (from VadSegmenter).
+    """
+
+    def __init__(
+        self,
+        model_dir: str | Path,
+        sample_rate: int = 16000,
+        language: str = "zh",
+        use_itn: bool = True,
+        num_threads: int = 2,
+    ) -> None:
+        from sherpa_onnx import OfflineRecognizer
+
+        model_dir = Path(model_dir)
+        _check_file(model_dir / "tokens.txt")
+        _check_file(model_dir / "model.onnx")
+
+        self._rec = OfflineRecognizer.from_sense_voice(
+            model=str(model_dir / "model.onnx"),
+            tokens=str(model_dir / "tokens.txt"),
+            language=language,
+            use_itn=use_itn,
+            num_threads=num_threads,
+            sample_rate=sample_rate,
+        )
+        self._sample_rate = sample_rate
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    def recognize(self, samples: np.ndarray) -> str:
+        """Recognize a complete speech segment. Returns text."""
+        stream = self._rec.create_stream()
+        stream.accept_waveform(self._sample_rate, samples.astype(np.float32))
+        self._rec.decode_stream(stream)
+        return stream.get_result().text.strip()
+
+
+class FunAsrRecognizer:
+    """Offline Chinese ASR via FunASR + SenseVoiceSmall (PyTorch backend).
+
+    Auto-downloads the model from ModelScope on first use.
+    Designed to be fed complete speech segments.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "iic/SenseVoiceSmall",
+        device: str = "cpu",
+        language: str = "zh",
+        use_itn: bool = True,
+        sample_rate: int = 16000,
+        verbose: bool = False,
+    ) -> None:
+        import io
+        import logging
+
+        self._verbose = verbose
+
+        # Silence noisy funasr / modelscope logs (download spam, warnings)
+        if not verbose:
+            for name in ("", "root", "modelscope"):
+                logging.getLogger(name).setLevel(logging.ERROR)
+
+        # Use local model cache; avoid proxy connection failures
+        _clear_proxy_env()
+
+        with _silence(not verbose):
+            from funasr import AutoModel
+            self._model = AutoModel(
+                model=model_name,
+                trust_remote_code=True,
+                device=device,
+                disable_update=True,
+            )
+        self._language = language
+        self._use_itn = use_itn
+        self._sample_rate = sample_rate
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    def recognize(self, samples: np.ndarray) -> str:
+        """Recognize a complete speech segment. Returns clean text."""
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+        with _silence(not self._verbose):
+            res = self._model.generate(
+                input=samples.astype(np.float32),
+                cache={},
+                language=self._language,
+                use_itn=self._use_itn,
+                batch_size_s=0,
+            )
+        if not res:
+            return ""
+        text = res[0].get("text", "")
+        return rich_transcription_postprocess(text).strip()
+
+
+@contextlib.contextmanager
+def _silence(enabled: bool = True):
+    """Redirect stdout/stderr to capture tqdm bars and stray warnings."""
+    if not enabled:
+        yield
+        return
+    null = io.StringIO()
+    with contextlib.redirect_stdout(null), contextlib.redirect_stderr(null):
+        yield
+
+
