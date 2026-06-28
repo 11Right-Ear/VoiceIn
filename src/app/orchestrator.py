@@ -53,9 +53,11 @@ class Orchestrator:
                 sample_rate=cfg.sample_rate,
                 language=cfg.language or None,  # 空字符串 → None → 让模型自动检测
             )
+            silence_blocks = max(1, cfg.vad_silence_ms // cfg.block_ms)
             self._vad = EnergyVad(
                 threshold=cfg.vad_threshold,
                 block_ms=cfg.block_ms, sample_rate=cfg.sample_rate,
+                silence_blocks_to_stop=silence_blocks,
             )
 
         # streaming 累积状态
