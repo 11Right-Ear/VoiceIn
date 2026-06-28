@@ -52,6 +52,8 @@ class Orchestrator:
             self._rec = FunAsrRecognizer(
                 sample_rate=cfg.sample_rate,
                 language=cfg.language or None,  # 空字符串 → None → 让模型自动检测
+                corrections=cfg.corrections or None,
+                deny_words=cfg.deny_words or None,
             )
             silence_blocks = max(1, cfg.vad_silence_ms // cfg.block_ms)
             self._vad = EnergyVad(

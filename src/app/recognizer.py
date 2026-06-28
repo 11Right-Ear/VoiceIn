@@ -39,6 +39,28 @@ def remove_fillers(text: str) -> str:
     return text.strip()
 
 
+def apply_corrections(
+    text: str,
+    corrections: dict[str, str] | None = None,
+    deny_words: list[str] | None = None,
+) -> str:
+    """Apply user-defined correction map and deny list.
+
+    Args:
+        text: ASR output text.
+        corrections: {wrong: correct} — substring replace, case-sensitive.
+        deny_words: words to strip from output entirely.
+    """
+    if corrections:
+        for wrong, correct in corrections.items():
+            text = text.replace(wrong, correct)
+    if deny_words:
+        pat = '|'.join(re.escape(w) for w in deny_words)
+        text = re.sub(pat, '', text)
+        text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
+
+
 def _clear_proxy_env() -> None:
     """Clear proxy env vars so funasr/modelscope use the local model cache
     instead of trying to reach modelscope.cn through a dead proxy."""
@@ -243,6 +265,8 @@ class FunAsrRecognizer:
         use_itn: bool = True,
         sample_rate: int = 16000,
         verbose: bool = False,
+        corrections: dict[str, str] | None = None,
+        deny_words: list[str] | None = None,
     ) -> None:
         import io
         import logging
@@ -276,6 +300,8 @@ class FunAsrRecognizer:
         self._language = language
         self._use_itn = use_itn
         self._sample_rate = sample_rate
+        self._corrections = corrections or {}
+        self._deny_words = deny_words or []
 
     @property
     def sample_rate(self) -> int:
@@ -297,7 +323,8 @@ class FunAsrRecognizer:
             return ""
         text = res[0].get("text", "")
         text = rich_transcription_postprocess(text).strip()
-        return remove_fillers(text)
+        text = remove_fillers(text)
+        return apply_corrections(text, self._corrections, self._deny_words)
 
 
 @contextlib.contextmanager

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".voicein"
@@ -22,6 +22,8 @@ class Config:
     vad_threshold: float = 0.006  # EnergyVad 阈值，环境噪声大时调高
     vad_silence_ms: int = 1000   # EnergyVad 连续静音多久切段（毫秒）
     language: str = ""          # 识别语言；空 = 自动检测，也可指定 zh / en / ja / ko
+    corrections: dict[str, str] = field(default_factory=dict)  # 纠错字典 {"APi": "API", "dome": "demo"}
+    deny_words: list[str] = field(default_factory=list)        # 禁用词列表，输出中被过滤
 
 
 def load() -> Config:
@@ -41,6 +43,8 @@ def load() -> Config:
                 vad_threshold=data.get("vad_threshold", 0.006),
                 vad_silence_ms=data.get("vad_silence_ms", 1000),
                 language=data.get("language", ""),
+                corrections=data.get("corrections", {}),
+                deny_words=data.get("deny_words", []),
             )
         except Exception:
             pass
@@ -64,6 +68,8 @@ def save(cfg: Config) -> None:
                 "vad_threshold": cfg.vad_threshold,
                 "vad_silence_ms": cfg.vad_silence_ms,
                 "language": cfg.language,
+                "corrections": cfg.corrections,
+                "deny_words": cfg.deny_words,
             },
             indent=2,
             ensure_ascii=False,
