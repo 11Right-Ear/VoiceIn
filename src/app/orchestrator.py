@@ -67,6 +67,10 @@ class Orchestrator:
         self._acc_samples = 0
         self._can_decode = False
 
+        # 短段合并：VAD 切出来的短段先缓存等下一段一起识别
+        self._pending_audio: np.ndarray | None = None
+        self._merge_count = 0
+
     # ----- public: called from hotkey thread -----
 
     def on_hotkey(self) -> None:
@@ -82,6 +86,8 @@ class Orchestrator:
         try:
             if self._vad is not None:
                 self._vad.reset()
+                self._pending_audio = None
+                self._merge_count = 0
             else:
                 self._stream = self._rec.create_stream()
                 self._acc_samples = 0
@@ -102,9 +108,12 @@ class Orchestrator:
             pass
 
         if self._vad is not None:
-            # flush 剩余段
+            # 先把 VAD 缓存的最后一段吐出来（可能和 pending 合并）
             for seg in self._vad.flush():
-                self._recognize_and_paste(seg)
+                self._process_segment(seg)
+            # 如果合并后还有剩余 pending（没有后续音频了），强制粘贴
+            if self._pending_audio is not None:
+                self._paste_pending()
         elif self._stream is not None:
             # streaming：停止时一次性识别
             self._recognize_and_paste_stream()
@@ -119,17 +128,63 @@ class Orchestrator:
 
         if self._vad is not None:
             for seg in self._vad.feed(samples):
-                self._recognize_and_paste(seg)
+                self._process_segment(seg)
         else:
             self._on_audio_streaming(samples)
 
-    def _recognize_and_paste(self, seg: np.ndarray) -> None:
+    def _process_segment(self, seg: np.ndarray) -> None:
+        """Recognize a VAD segment, merging short ones with the next.
+
+        If the recognized text is shorter than merge_short_threshold and
+        merge_short_segments is on, the raw audio is buffered.  When the next
+        segment arrives the two are concatenated and re-recognized so that
+        pauses mid-sentence don't produce disconnected fragments.
+        """
+        # 1. Recognize this segment in isolation
         try:
             text = self._rec.recognize(seg)
         except Exception as e:
             self._tray.notify("VoiceIn 错误", f"识别失败: {e}")
+            self._pending_audio = None
+            self._merge_count = 0
             return
-        if text.strip():
+        text = text.strip()
+
+        # 2. If there's a pending short segment, merge audio & re-recognize
+        if self._pending_audio is not None:
+            seg = np.concatenate([self._pending_audio, seg])
+            self._pending_audio = None
+            try:
+                text = self._rec.recognize(seg).strip()
+            except Exception:
+                text = ""  # fallback: use individual result instead
+
+        # 3. If still too short, buffer for the next merge
+        if (self._cfg.merge_short_segments
+                and text
+                and len(text) < self._cfg.merge_short_threshold
+                and self._merge_count < 3):  # cap at 3 merges
+            self._pending_audio = seg
+            self._merge_count += 1
+            return
+
+        # 4. Long enough (or merging disabled) → paste
+        self._pending_audio = None
+        self._merge_count = 0
+        if text:
+            paste(text)
+            if self._cfg.auto_enter:
+                _press_enter()
+
+    def _paste_pending(self) -> None:
+        """Force-paste whatever is in the pending buffer (stop path)."""
+        try:
+            text = self._rec.recognize(self._pending_audio).strip()
+        except Exception:
+            text = ""
+        self._pending_audio = None
+        self._merge_count = 0
+        if text:
             paste(text)
             if self._cfg.auto_enter:
                 _press_enter()

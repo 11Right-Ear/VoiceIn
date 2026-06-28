@@ -24,6 +24,8 @@ class Config:
     language: str = ""          # 识别语言；空 = 自动检测，也可指定 zh / en / ja / ko
     corrections: dict[str, str] = field(default_factory=dict)  # 纠错字典 {"APi": "API", "dome": "demo"}
     deny_words: list[str] = field(default_factory=list)        # 禁用词列表，输出中被过滤
+    merge_short_segments: bool = True     # 是否合并短段（< N 字的不立刻粘贴，等下一段）
+    merge_short_threshold: int = 3        # 少于多少字视为「短段」
 
 
 def load() -> Config:
@@ -45,6 +47,8 @@ def load() -> Config:
                 language=data.get("language", ""),
                 corrections=data.get("corrections", {}),
                 deny_words=data.get("deny_words", []),
+                merge_short_segments=data.get("merge_short_segments", True),
+                merge_short_threshold=data.get("merge_short_threshold", 3),
             )
         except Exception:
             pass
@@ -70,6 +74,8 @@ def save(cfg: Config) -> None:
                 "language": cfg.language,
                 "corrections": cfg.corrections,
                 "deny_words": cfg.deny_words,
+                "merge_short_segments": cfg.merge_short_segments,
+                "merge_short_threshold": cfg.merge_short_threshold,
             },
             indent=2,
             ensure_ascii=False,
