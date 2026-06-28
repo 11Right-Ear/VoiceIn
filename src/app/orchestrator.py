@@ -49,7 +49,10 @@ class Orchestrator:
         else:
             from recognizer import FunAsrRecognizer
             from vad import EnergyVad
-            self._rec = FunAsrRecognizer(sample_rate=cfg.sample_rate)
+            self._rec = FunAsrRecognizer(
+                sample_rate=cfg.sample_rate,
+                language=cfg.language or None,  # 空字符串 → None → 让模型自动检测
+            )
             self._vad = EnergyVad(
                 threshold=cfg.vad_threshold,
                 block_ms=cfg.block_ms, sample_rate=cfg.sample_rate,

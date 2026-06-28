@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -11,6 +12,31 @@ from pathlib import Path
 
 import numpy as np
 from sherpa_onnx import OnlineRecognizer as _SherpaOnline, OnlineStream
+
+# ── Filler / hesitation words for Chinese speech ──────────────────────────
+# These carry negligible semantic content and are safe to strip after ASR.
+# Equivalent to "um", "uh", "er" in English.
+
+_FILLER_CHARS = '嗯呃唔'
+
+def remove_fillers(text: str) -> str:
+    """Strip common filler words (嗯/呃/唔) from ASR output.
+
+    Removes fillers that appear:
+      - at the start of text,      e.g. 嗯我觉得…  → 我觉得…
+      - at the end of text,        e.g. …好的嗯    → …好的
+      - between non-filler chars,  e.g. 这个嗯方案  → 这个方案
+    """
+    cls = _FILLER_CHARS
+    # Collapse repeated fillers first, then remove them
+    text = re.sub(rf'^[{cls}]+', '', text)                    # leading fillers
+    text = re.sub(rf'[{cls}]+$', '', text)                    # trailing fillers
+    text = re.sub(rf'([^{cls}])[{cls}]+(?=[^{cls}])', r'\1', text)  # between words
+    # Clean up doubled punctuation left after removal
+    text = re.sub(r'([，。、；：？！…])\1+', r'\1', text)
+    # Collapse whitespace runs
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
 
 
 def _clear_proxy_env() -> None:
@@ -213,7 +239,7 @@ class FunAsrRecognizer:
         self,
         model_name: str = "iic/SenseVoiceSmall",
         device: str = "cpu",
-        language: str = "zh",
+        language: str | None = None,
         use_itn: bool = True,
         sample_rate: int = 16000,
         verbose: bool = False,
@@ -233,6 +259,14 @@ class FunAsrRecognizer:
 
         with _silence(not verbose):
             from funasr import AutoModel
+            # Force-register all model/tokenizer/frontend classes.
+            # PyInstaller misses these dynamic @tables.register calls otherwise,
+            # leaving tokenizer_classes empty → 'NoneType' object is not callable.
+            import funasr.models.sense_voice  # noqa: F401
+            import funasr.tokenizer  # noqa: F401
+            import funasr.tokenizer.whisper_tokenizer  # noqa: F401
+            import funasr.tokenizer.sentencepiece_tokenizer  # noqa: F401
+            import funasr.frontends  # noqa: F401
             self._model = AutoModel(
                 model=model_name,
                 trust_remote_code=True,
@@ -252,17 +286,18 @@ class FunAsrRecognizer:
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
         with _silence(not self._verbose):
+            kwargs: dict = dict(cache={}, use_itn=self._use_itn, batch_size_s=0)
+            if self._language is not None:
+                kwargs["language"] = self._language
             res = self._model.generate(
                 input=samples.astype(np.float32),
-                cache={},
-                language=self._language,
-                use_itn=self._use_itn,
-                batch_size_s=0,
+                **kwargs,
             )
         if not res:
             return ""
         text = res[0].get("text", "")
-        return rich_transcription_postprocess(text).strip()
+        text = rich_transcription_postprocess(text).strip()
+        return remove_fillers(text)
 
 
 @contextlib.contextmanager

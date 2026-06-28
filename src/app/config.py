@@ -20,6 +20,7 @@ class Config:
     engine: str = "sensevoice"  # sensevoice | streaming
     auto_enter: bool = False    # paste 后是否自动回车
     vad_threshold: float = 0.006  # EnergyVad 阈值，环境噪声大时调高
+    language: str = ""          # 识别语言；空 = 自动检测，也可指定 zh / en / ja / ko
 
 
 def load() -> Config:
@@ -37,6 +38,7 @@ def load() -> Config:
                 engine=data.get("engine", "sensevoice"),
                 auto_enter=data.get("auto_enter", False),
                 vad_threshold=data.get("vad_threshold", 0.006),
+                language=data.get("language", ""),
             )
         except Exception:
             pass
@@ -58,6 +60,7 @@ def save(cfg: Config) -> None:
                 "engine": cfg.engine,
                 "auto_enter": cfg.auto_enter,
                 "vad_threshold": cfg.vad_threshold,
+                "language": cfg.language,
             },
             indent=2,
             ensure_ascii=False,
