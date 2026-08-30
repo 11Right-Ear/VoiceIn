@@ -26,6 +26,14 @@ class Config:
     deny_words: list[str] = field(default_factory=list)        # 禁用词列表，输出中被过滤
     merge_short_segments: bool = True     # 是否合并短段（< N 字的不立刻粘贴，等下一段）
     merge_short_threshold: int = 3        # 少于多少字视为「短段」
+    api_url: str = ""                     # LLM API 地址（engine="llm" 时使用）
+    api_key: str = ""                     # LLM API Key
+    api_model: str = ""                   # LLM 模型名称
+    api_prompt: str = (
+        "你是一个语音识别后处理助手。用户说了一段话：\n{text}\n"
+        "请修正明显的语音识别错误，保持原意，输出修正后的文字。"
+        "只输出修正后的文字，不要其他解释。"
+    )
 
 
 def load() -> Config:
@@ -49,6 +57,15 @@ def load() -> Config:
                 deny_words=data.get("deny_words", []),
                 merge_short_segments=data.get("merge_short_segments", True),
                 merge_short_threshold=data.get("merge_short_threshold", 3),
+                api_url=data.get("api_url", ""),
+                api_key=data.get("api_key", ""),
+                api_model=data.get("api_model", ""),
+                api_prompt=data.get(
+                    "api_prompt",
+                    "你是一个语音识别后处理助手。用户说了一段话：\n{text}\n"
+                    "请修正明显的语音识别错误，保持原意，输出修正后的文字。"
+                    "只输出修正后的文字，不要其他解释。",
+                ),
             )
         except Exception:
             pass
@@ -76,6 +93,10 @@ def save(cfg: Config) -> None:
                 "deny_words": cfg.deny_words,
                 "merge_short_segments": cfg.merge_short_segments,
                 "merge_short_threshold": cfg.merge_short_threshold,
+                "api_url": cfg.api_url,
+                "api_key": cfg.api_key,
+                "api_model": cfg.api_model,
+                "api_prompt": cfg.api_prompt,
             },
             indent=2,
             ensure_ascii=False,

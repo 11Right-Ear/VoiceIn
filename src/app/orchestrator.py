@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 from enum import Enum, auto
 from pathlib import Path
@@ -29,6 +30,7 @@ class Orchestrator:
         self._tray = tray
         self._state = State.IDLE
         self._lock = threading.Lock()
+        self._pasted_set: set[str] = set()
 
         # 常驻加载（一次性，几秒）
         self._audio = AudioCapture(
@@ -46,12 +48,39 @@ class Orchestrator:
                 enable_vad=False, vad_timeout_ms=cfg.vad_timeout_ms,
             )
             self._vad = None
+            self._llm_results: queue.Queue[str] | None = None
+        elif cfg.engine == "llm":
+            from recognizer import FunAsrRecognizer
+            from recognizer_llm import LlmRecognizer
+            from vad import EnergyVad
+            local_rec = FunAsrRecognizer(
+                sample_rate=cfg.sample_rate,
+                language=cfg.language or None,
+                corrections=cfg.corrections or None,
+                deny_words=cfg.deny_words or None,
+            )
+            self._llm_results = queue.Queue()
+            self._rec = LlmRecognizer(
+                local_rec=local_rec,
+                api_url=cfg.api_url,
+                api_key=cfg.api_key,
+                api_model=cfg.api_model,
+                api_prompt=cfg.api_prompt,
+                result_queue=self._llm_results,
+                sample_rate=cfg.sample_rate,
+            )
+            silence_blocks = max(1, cfg.vad_silence_ms // cfg.block_ms)
+            self._vad = EnergyVad(
+                threshold=cfg.vad_threshold,
+                block_ms=cfg.block_ms, sample_rate=cfg.sample_rate,
+                silence_blocks_to_stop=silence_blocks,
+            )
         else:
             from recognizer import FunAsrRecognizer
             from vad import EnergyVad
             self._rec = FunAsrRecognizer(
                 sample_rate=cfg.sample_rate,
-                language=cfg.language or None,  # 空字符串 → None → 让模型自动检测
+                language=cfg.language or None,
                 corrections=cfg.corrections or None,
                 deny_words=cfg.deny_words or None,
             )
@@ -61,6 +90,7 @@ class Orchestrator:
                 block_ms=cfg.block_ms, sample_rate=cfg.sample_rate,
                 silence_blocks_to_stop=silence_blocks,
             )
+            self._llm_results = None
 
         # streaming 累积状态
         self._stream = None
@@ -73,6 +103,10 @@ class Orchestrator:
 
     # ----- public: called from hotkey thread -----
 
+    def stop(self) -> None:
+        if hasattr(self._rec, "stop"):
+            self._rec.stop()
+
     def on_hotkey(self) -> None:
         with self._lock:
             if self._state == State.IDLE:
@@ -83,6 +117,7 @@ class Orchestrator:
     # ----- recording control -----
 
     def _start_recording(self) -> None:
+        self._pasted_set.clear()
         try:
             if self._vad is not None:
                 self._vad.reset()
@@ -118,6 +153,21 @@ class Orchestrator:
             # streaming：停止时一次性识别
             self._recognize_and_paste_stream()
 
+        # 等 LLM 结果回来（最多等 5 秒）
+        if self._llm_results is not None:
+            import time
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    text = self._llm_results.get_nowait()
+                    if text not in self._pasted_set:
+                        self._pasted_set.add(text)
+                        paste(text)
+                        if self._cfg.auto_enter:
+                            _press_enter()
+                except queue.Empty:
+                    break
+
         self._tray.set_recording(False)
 
     # ----- audio callback (runs on AudioCapture consumer thread) -----
@@ -126,6 +176,20 @@ class Orchestrator:
         if self._state != State.RECORDING:
             return
 
+        if self._llm_results is not None:
+            try:
+                while True:
+                    text = self._llm_results.get_nowait()
+                    if text not in self._pasted_set:
+                        self._pasted_set.add(text)
+                        if len(self._pasted_set) > 20:
+                            self._pasted_set.clear()
+                        paste(text)
+                        if self._cfg.auto_enter:
+                            _press_enter()
+            except queue.Empty:
+                pass
+
         if self._vad is not None:
             for seg in self._vad.feed(samples):
                 self._process_segment(seg)
@@ -133,13 +197,7 @@ class Orchestrator:
             self._on_audio_streaming(samples)
 
     def _process_segment(self, seg: np.ndarray) -> None:
-        """Recognize a VAD segment, merging short ones with the next.
-
-        If the recognized text is shorter than merge_short_threshold and
-        merge_short_segments is on, the raw audio is buffered.  When the next
-        segment arrives the two are concatenated and re-recognized so that
-        pauses mid-sentence don't produce disconnected fragments.
-        """
+        """Recognize a VAD segment, merging short ones with the next."""
         # 1. Recognize this segment in isolation
         try:
             text = self._rec.recognize(seg)
@@ -172,6 +230,7 @@ class Orchestrator:
         self._pending_audio = None
         self._merge_count = 0
         if text:
+            self._pasted_set.add(text)
             paste(text)
             if self._cfg.auto_enter:
                 _press_enter()
@@ -185,6 +244,7 @@ class Orchestrator:
         self._pending_audio = None
         self._merge_count = 0
         if text:
+            self._pasted_set.add(text)
             paste(text)
             if self._cfg.auto_enter:
                 _press_enter()
