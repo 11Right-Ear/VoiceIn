@@ -31,6 +31,7 @@ class Orchestrator:
         self._state = State.IDLE
         self._lock = threading.Lock()
         self._pasted_set: set[str] = set()
+        self._state_callbacks: list[callable] = []
 
         # 常驻加载（一次性，几秒）
         self._audio = AudioCapture(
@@ -101,6 +102,10 @@ class Orchestrator:
         self._pending_audio: np.ndarray | None = None
         self._merge_count = 0
 
+    def register_state_callback(self, cb: callable) -> None:
+        """Register a callback for state changes. Callback receives (state: str)."""
+        self._state_callbacks.append(cb)
+
     # ----- public: called from hotkey thread -----
 
     def stop(self) -> None:
@@ -134,9 +139,19 @@ class Orchestrator:
 
         self._state = State.RECORDING
         self._tray.set_recording(True)
+        for cb in self._state_callbacks:
+            try:
+                cb("recording")
+            except Exception:
+                pass
 
     def _stop_recording(self) -> None:
         self._state = State.IDLE
+        for cb in self._state_callbacks:
+            try:
+                cb("idle")
+            except Exception:
+                pass
         try:
             self._audio.stop()
         except Exception:

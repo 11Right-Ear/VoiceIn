@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>皮肤制作工具 v1.0 - VoiceIn</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header__left">
+                <span class="header__logo">🎨</span>
+                <h1 class="header__title">皮肤制作工具 v1.0</h1>
+            </div>
+            <div class="header__right">
+                <button class="btn btn--secondary" id="btn-preview-all">预览全部</button>
+                <button class="btn btn--primary" id="btn-export">导出皮肤</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Left Panel: Frame List & State Config -->
+            <aside class="panel panel--left">
+                <!-- Frame List -->
+                <section class="panel__section">
+                    <div class="section__header">
+                        <h2 class="section__title">帧列表</h2>
+                        <div class="section__actions">
+                            <button class="btn btn--small" id="btn-add-frames" title="导入帧">+ 导入</button>
+                            <button class="btn btn--small" id="btn-delete-frame" title="删除帧">🗑</button>
+                            <button class="btn btn--small" id="btn-copy-frame" title="复制帧">📋</button>
+                        </div>
+                    </div>
+                    <div class="frame-list" id="frame-list">
+                        <!-- Frames will be inserted here -->
+                    </div>
+                    <input type="file" id="file-input" accept="image/png" multiple hidden>
+                </section>
+
+                <!-- State Config -->
+                <section class="panel__section">
+                    <div class="section__header">
+                        <h2 class="section__title">状态配置</h2>
+                    </div>
+                    <div class="state-list" id="state-list">
+                        <label class="state-item">
+                            <input type="radio" name="state" value="idle" checked>
+                            <span class="state-item__icon">💤</span>
+                            <span class="state-item__name">idle</span>
+                            <span class="state-item__count" id="state-count-idle">0帧</span>
+                        </label>
+                        <label class="state-item">
+                            <input type="radio" name="state" value="recording">
+                            <span class="state-item__icon">🎙️</span>
+                            <span class="state-item__name">recording</span>
+                            <span class="state-item__count" id="state-count-recording">0帧</span>
+                        </label>
+                        <label class="state-item">
+                            <input type="radio" name="state" value="recognizing">
+                            <span class="state-item__icon">🔍</span>
+                            <span class="state-item__name">recognizing</span>
+                            <span class="state-item__count" id="state-count-recognizing">0帧</span>
+                        </label>
+                        <label class="state-item">
+                            <input type="radio" name="state" value="completed">
+                            <span class="state-item__icon">✅</span>
+                            <span class="state-item__name">completed</span>
+                            <span class="state-item__count" id="state-count-completed">0帧</span>
+                        </label>
+                        <label class="state-item">
+                            <input type="radio" name="state" value="error">
+                            <span class="state-item__icon">❌</span>
+                            <span class="state-item__name">error</span>
+                            <span class="state-item__count" id="state-count-error">0帧</span>
+                        </label>
+                        <label class="state-item">
+                            <input type="radio" name="state" value="drag">
+                            <span class="state-item__icon">👋</span>
+                            <span class="state-item__name">drag</span>
+                            <span class="state-item__count" id="state-count-drag">0帧</span>
+                        </label>
+                    </div>
+                    <div class="state-options">
+                        <label class="checkbox">
+                            <input type="checkbox" id="state-loop" checked>
+                            <span>循环播放</span>
+                        </label>
+                        <div class="form-group">
+                            <label>帧间隔:</label>
+                            <input type="number" id="state-interval" value="100" min="16" max="1000" step="10">
+                            <span>ms</span>
+                        </div>
+                    </div>
+                </section>
+            </aside>
+
+            <!-- Center: Canvas Editor -->
+            <section class="canvas-area">
+                <div class="canvas-editor" id="canvas-editor">
+                    <canvas id="editor-canvas"></canvas>
+                    <div class="canvas-overlay" id="canvas-overlay">
+                        <span>拖拽图片到此处或点击"导入"按钮</span>
+                    </div>
+                </div>
+                <div class="canvas-tools">
+                    <button class="btn btn--small" id="btn-prev-frame">◀ 上一帧</button>
+                    <button class="btn btn--small" id="btn-next-frame">下一帧 ▶</button>
+                    <label class="checkbox">
+                        <input type="checkbox" id="show-ghost">
+                        <span>洋葱皮</span>
+                    </label>
+                    <span class="frame-indicator" id="frame-indicator">第 0 / 0 帧</span>
+                </div>
+            </section>
+
+            <!-- Right Panel: Animation Preview -->
+            <aside class="panel panel--right">
+                <section class="panel__section panel__section--preview">
+                    <div class="section__header">
+                        <h2 class="section__title">动画预览</h2>
+                        <div class="section__actions">
+                            <button class="btn btn--small" id="btn-fullscreen" title="全屏预览">⛶</button>
+                        </div>
+                    </div>
+                    <div class="preview-container" id="preview-container">
+                        <canvas id="preview-canvas"></canvas>
+                    </div>
+                    <div class="preview-controls">
+                        <button class="btn btn--small" id="btn-play-preview">▶ 播放</button>
+                        <button class="btn btn--small" id="btn-stop-preview">⏹ 停止</button>
+                        <div class="form-group">
+                            <label>FPS:</label>
+                            <input type="range" id="preview-fps" min="10" max="60" value="10">
+                            <span id="preview-fps-value">10</span>
+                        </div>
+                    </div>
+                </section>
+            </aside>
+        </main>
+
+        <!-- Footer: Skin Config -->
+        <footer class="footer">
+            <div class="footer__left">
+                <div class="form-group">
+                    <label for="skin-name">名称:</label>
+                    <input type="text" id="skin-name" placeholder="我的皮肤" value="VoiceIn Skin">
+                </div>
+                <div class="form-group">
+                    <label for="skin-author">作者:</label>
+                    <input type="text" id="skin-author" placeholder="匿名" value="">
+                </div>
+                <div class="form-group">
+                    <label for="skin-version">版本:</label>
+                    <input type="text" id="skin-version" placeholder="1.0" value="1.0">
+                </div>
+            </div>
+            <div class="footer__right">
+                <div class="form-group">
+                    <label>帧尺寸:</label>
+                    <input type="number" id="frame-width" value="64" min="16" max="512">
+                    <span>×</span>
+                    <input type="number" id="frame-height" value="64" min="16" max="512">
+                </div>
+                <button class="btn btn--secondary" id="btn-copy-json">复制 JSON</button>
+                <button class="btn btn--secondary" id="btn-save-local">保存进度</button>
+                <button class="btn btn--secondary" id="btn-load-local">加载进度</button>
+            </div>
+        </footer>
+
+        <!-- Fullscreen Preview Modal -->
+        <div class="modal" id="fullscreen-modal">
+            <div class="modal__content modal__content--fullscreen">
+                <button class="modal__close" id="modal-close">×</button>
+                <canvas id="fullscreen-canvas"></canvas>
+                <div class="modal__controls">
+                    <button class="btn btn--secondary" id="btn-play-fullscreen">▶ 播放</button>
+                    <button class="btn btn--secondary" id="btn-stop-fullscreen">⏹ 停止</button>
+                    <span id="fullscreen-state">idle</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Export Modal -->
+        <div class="modal" id="export-modal">
+            <div class="modal__content">
+                <h2 class="modal__title">导出皮肤</h2>
+                <button class="modal__close" id="export-modal-close">×</button>
+                <div class="export-preview" id="export-preview">
+                    <canvas id="export-preview-canvas"></canvas>
+                </div>
+                <div class="export-info">
+                    <p>皮肤名称: <span id="export-name">VoiceIn Skin</span></p>
+                    <p>总帧数: <span id="export-frame-count">0</span></p>
+                    <p>帧尺寸: <span id="export-size">64×64</span></p>
+                </div>
+                <div class="export-actions">
+                    <button class="btn btn--primary" id="btn-download-zip">下载 ZIP</button>
+                    <button class="btn btn--secondary" id="btn-copy-export-json">复制 JSON</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script type="module" src="js/skin-exporter.js"></script>
+    <script type="module" src="js/canvas-editor.js"></script>
+    <script type="module" src="js/animation-preview.js"></script>
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

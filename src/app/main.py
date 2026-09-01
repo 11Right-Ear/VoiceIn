@@ -14,6 +14,7 @@ if str(_here) not in sys.path:
 from config import load
 from hotkey import GlobalHotkey
 from pet_tray import PetTray
+from pet_integration import create_integration, destroy_integration
 from orchestrator import Orchestrator
 
 
@@ -36,10 +37,13 @@ def main() -> None:
     _log(f"=== VoiceIn start, engine={cfg.engine} device={cfg.device_id} ===")
 
     orch: Orchestrator | None = None
+    pet = None
 
     def _on_quit() -> None:
-        nonlocal orch
+        nonlocal orch, pet
         hotkey.stop()
+        if pet:
+            pet.destroy()
         if orch:
             orch.stop()
 
@@ -63,6 +67,27 @@ def main() -> None:
         _log(detail)
         _alert("VoiceIn 错误", f"模型加载失败:\n\n{e}\n\n完整日志:\n{tempfile.gettempdir()}\\voicein.log")
         return
+
+    # Initialize pet integration after orchestrator is ready
+    try:
+        pet = create_integration(
+            config=cfg.__dict__,
+            hotkey_callback=lambda: orch.on_hotkey(),
+        )
+        pet.start()
+
+        # Register pet state callback with orchestrator
+        def _on_orch_state(state: str) -> None:
+            if pet and pet.is_running:
+                pet.on_orchestrator_state_changed(state)
+
+        orch.register_state_callback(_on_orch_state)
+
+        _log("pet integration started OK")
+    except Exception as e:
+        import traceback
+        _log(f"pet integration failed: {e}\n{traceback.format_exc()}")
+        pet = None
 
     _log("model loaded OK")
     hotkey.start()
